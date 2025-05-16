@@ -1,6 +1,6 @@
 {
   "name": "vpn-whitelister",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "A service to dynamically whitelist client IPs in `iptables` for VPN access via HTTP API.",
   "author": "Valerio Coltre <valerio.coltre@gmail.com>",
   "license": "MIT",

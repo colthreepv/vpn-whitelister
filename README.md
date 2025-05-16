@@ -5,7 +5,8 @@ A service to dynamically whitelist client IPs in `iptables` for VPN access via a
 ## Prerequisites
 
 *   Docker installed and running.
-*   A Linux host (or Docker environment with `NET_ADMIN` and `NET_RAW` capabilities).
+*   The `iptables-agent.sh` script running on the Docker host with `sudo` access for `iptables` commands.
+*   The main `vpn-whitelister` application container does not require special privileges.
 
 ## Build the Image
 
