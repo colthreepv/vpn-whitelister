@@ -31,23 +31,38 @@ The following environment variables are used to configure the application:
 
 *   `PORT`: The internal port on which the whitelister service will listen inside the container.
     *   Default: `5000`
-*   `IPTABLES_CHAIN`: The `iptables` chain to which the rules will be added/deleted.
-    *   Default: `INPUT`
-    *   Ensure this chain exists on your system.
+*   `INTERNAL_PORT`: The internal port where the VPN service (that traffic is forwarded to) is listening.
+    *   Default: `8443`
+*   `EXTERNAL_PORT`: The external port exposed to the internet for VPN connections, which will be whitelisted.
+    *   Default: `41872`
+*   `IPTABLES_NAT_CHAIN`: The name for the custom `iptables` NAT chain.
+    *   Default: `VPN-NAT`
+*   `IPTABLES_FILTER_CHAIN`: The name for the custom `iptables` filter chain used for whitelisting.
+    *   Default: `VPN-FILTER`
+
+## Chain Management
+
+This service creates and manages two dedicated `iptables` chains:
+*   **`IPTABLES_NAT_CHAIN` (default: `VPN-NAT`):** Used in the `nat` table for port forwarding rules (DNAT/REDIRECT). It redirects traffic from `EXTERNAL_PORT` to `INTERNAL_PORT`.
+*   **`IPTABLES_FILTER_CHAIN` (default: `VPN-FILTER`):** Used in the `filter` table for managing whitelist access rules to the `EXTERNAL_PORT`.
+
+These chains are automatically created, linked to `PREROUTING` (for NAT) and `INPUT` (for filter) respectively, and cleaned up when the service stops gracefully.
 
 ## Running the Container
 
-To run the container, you need to provide the required environment variables and map the internal application port (`PORT`) to a host port. You also need to grant the container capabilities to modify `iptables`.
+To run the container, you need to provide the required environment variables and map the internal application port (`PORT`) to a host port for API access. You also need to map the `EXTERNAL_PORT` for VPN traffic. Crucially, grant the container capabilities to modify `iptables`.
 
-**Example (running the service and mapping internal port 5000 to host port 8080):**
+**Example (running the service, mapping API port 5000 to host 8080, and exposing external VPN port 41872):**
 
 ```bash
 docker run -d \
   --name vpn-whitelister-app \
-  -p 8080:5000 \
+  -p 8080:5000 \                  # API port mapping (host:container)
   -e SECRET_TOKEN="your_super_secret_token" \
-  -e VPN_PORT="1194" \
-  -e IPTABLES_CHAIN="INPUT" \
+  -e INTERNAL_PORT="8443" \       # Port your VPN server listens on internally
+  -e EXTERNAL_PORT="41872" \     # Public port for VPN
+  -e IPTABLES_NAT_CHAIN="VPN-NAT" \         # Optional: custom NAT chain name
+  -e IPTABLES_FILTER_CHAIN="VPN-FILTER" \   # Optional: custom filter chain name
   --cap-add=NET_ADMIN \
   --cap-add=NET_RAW \
   --restart unless-stopped \
@@ -58,10 +73,12 @@ docker run -d \
 
 *   `-d`: Run in detached mode.
 *   `--name vpn-whitelister-app`: Assign a name to the container.
-*   `-p 8080:5000`: Map port `8080` on the host to port `5000` (or your configured `PORT`) inside the container.
+*   `-p 8080:5000`: Map API port `8080` on the host to port `5000` (or your configured `PORT`) inside the container.
 *   `-e SECRET_TOKEN="..."`: Set the secret token.
-*   `-e VPN_PORT="..."`: Set the VPN port.
-*   `-e IPTABLES_CHAIN="..."`: (Optional) Set the iptables chain.
+*   `-e INTERNAL_PORT="..."`: Set the internal VPN service port.
+*   `-e EXTERNAL_PORT="..."`: Set the public VPN port.
+*   `-e IPTABLES_NAT_CHAIN="..."`: (Optional) Set the custom NAT chain name.
+*   `-e IPTABLES_FILTER_CHAIN="..."`: (Optional) Set the custom filter chain name.
 *   `--cap-add=NET_ADMIN --cap-add=NET_RAW`: **Crucial for `iptables`**. Grants the container necessary privileges to manage network rules.
 *   `--restart unless-stopped`: Policy to restart the container if it stops.
 *   `vpn-whitelister`: The name of the image you built.
@@ -123,31 +140,35 @@ This section outlines a general workflow. **Please replace placeholders with you
     ```
 
 6.  **On the remote server, run the container (adjust parameters as needed):**
-    (Replace `your_host_port`, `your_secret_token`, `your_vpn_port`)
+    (Replace `your_host_api_port`, `your_secret_token`, `your_external_vpn_port`, `your_internal_vpn_port`)
     ```bash
     docker run -d \
       --name vpn-whitelister-remote \
-      -p your_host_port:5000 \
+      -p your_host_api_port:5000 \        # API port
+      -p your_external_vpn_port:your_external_vpn_port/tcp \ # External VPN port - adjust protocol
       -e SECRET_TOKEN="your_secret_token" \
-      -e VPN_PORT="your_vpn_port" \
+      -e INTERNAL_PORT="your_internal_vpn_port" \
+      -e EXTERNAL_PORT="your_external_vpn_port" \
+      # -e IPTABLES_NAT_CHAIN="VPN-NAT" \        # Optional
+      # -e IPTABLES_FILTER_CHAIN="VPN-FILTER" \  # Optional
       --cap-add=NET_ADMIN \
       --cap-add=NET_RAW \
       --restart unless-stopped \
       vpn-whitelister:latest
     ```
 
-7.  **Test the container on the remote server:**
-    (Replace `your_host_port` and `your_secret_token`. This example tests the GET / endpoint.)
+7.  Test the container on the remote server:
+    (Replace `your_host_api_port` and `your_secret_token`. This example tests the GET / endpoint.)
     ```bash
-    curl "http://localhost:your_host_port/?token=your_secret_token"
+    curl "http://localhost:your_host_api_port/?token=your_secret_token"
     ```
     You should see a JSON response listing whitelisted IPs (likely an empty array initially).
 
-    To test adding an IP, you would typically make a POST request from a machine *outside* the remote server, targeting the remote server's public IP and `your_host_port`.
+    To test adding an IP, you would typically make a POST request from a machine *outside* the remote server, targeting the remote server's public IP and `your_host_api_port`.
     ```bash
     # From a different machine (not the remote server itself)
-    # Replace <remote_server_ip>, <your_host_port>, <your_secret_token>
-    curl -X POST "http://<remote_server_ip>:<your_host_port>/whitelist?token=<your_secret_token>"
+    # Replace <remote_server_ip>, <your_host_api_port>, <your_secret_token>
+    curl -X POST "http://<remote_server_ip>:<your_host_api_port>/whitelist?token=<your_secret_token>"
     ```
 
 ---
