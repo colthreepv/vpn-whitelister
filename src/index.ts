@@ -52,11 +52,12 @@ async function executeIPTablesCommand(args: string[]): Promise<{ success: boolea
     const operationFlag = args.find(arg => ['-A', '-D', '-C', '-N', '-X', '-F', '-L', '-S', '-I'].includes(arg))
 
     const ruleNotFoundMessages = [
-      'No chain/target/match by that name',
-      'bad rule', // e.g. "iptables: Bad rule (does a matching rule exist in that chain?)."
-      'rule is not in chain', // Another variant
+      'no chain/target/match by that name',
+      'bad rule',
+      'rule is not in chain',
     ]
-    const stderrIndicatesRuleNotFound = ruleNotFoundMessages.some(msg => stderr.includes(msg))
+    const stderrLower = stderr.toLowerCase()
+    const stderrIndicatesRuleNotFound = ruleNotFoundMessages.some(msg => stderrLower.includes(msg))
 
     if (stdout.trim()) {
       console.warn(`iptables stdout: ${stdout.trim()}`)
