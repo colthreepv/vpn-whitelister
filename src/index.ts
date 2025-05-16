@@ -44,145 +44,161 @@ function isAuthenticated(request: Request): boolean {
 // New helper function for iptables commands using the agent (replaces old Bun.spawn version)
 async function executeIPTablesCommand(args: string[]): Promise<{ success: boolean, stdout?: string, stderr?: string, exitCode?: number }> {
   const commandString = args.join(' ')
-  // Avoid logging sensitive info if any args could be sensitive. For iptables, it's usually fine.
   console.warn(`Agent CMD: iptables ${commandString}`)
 
-  let socket: any // Bun.TCPSocket - type hint if available, else any
-
-  try {
-    socket = await Bun.connect({
-      hostname: IPTABLES_AGENT_HOST,
-      port: IPTABLES_AGENT_PORT,
-      socket: {
-        data(_socket, _data) {
-          // Data is handled by the main responsePromise loop below
-        },
-        open(socket) {
-          // console.log('Socket opened to agent');
-          socket.write(`${commandString}\n`) // Send command arguments followed by a newline
-          socket.flush()
-        },
-        close(_socket) {
-          // console.log('Socket to agent closed');
-        },
-        error(socket, error) {
-          // This error is critical and should cause the promise to reject.
-          // The current setup relies on the timeout or connection errors caught by the main try/catch.
-          // For more robust handling, this could directly reject a wrapping promise.
-          console.error(`Agent socket error: ${error.message}`)
-        },
-      },
-    })
-
+  return new Promise((resolve, reject) => {
+    let socket: any // Bun.TCPSocket - type hint if available, else any
     let rawOutput = ''
-    const responsePromise = (async () => {
-      for await (const chunk of socket) {
-        rawOutput += Buffer.from(chunk).toString()
-      }
-      return rawOutput
-    })()
+    let connectionOpened = false
 
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Agent response timeout for: iptables ${commandString}`)), 10000), // 10s timeout
-    )
+    const timeout = setTimeout(() => {
+      if (socket) {
+        socket.end() // Attempt to close the socket on timeout
+      }
+      // Reject the main promise
+      reject(new Error(`Agent response timeout for: iptables ${commandString}`))
+    }, 10000) // 10s timeout
 
-    rawOutput = await Promise.race([responsePromise, timeoutPromise]) as string
+    try {
+      socket = Bun.connect({
+        hostname: IPTABLES_AGENT_HOST,
+        port: IPTABLES_AGENT_PORT,
+        socket: {
+          data(_socket, data) {
+            rawOutput += Buffer.from(data).toString()
+            // Potentially check here if rawOutput contains "---END---" to resolve early
+            // However, relying on 'close' event is often more robust for TCP streams
+          },
+          open(sock) {
+            connectionOpened = true
+            // console.log('Socket opened to agent')
+            sock.write(`${commandString}\n`)
+            sock.flush()
+          },
+          close(_socket) {
+            // console.log('Socket to agent closed')
+            clearTimeout(timeout)
+            if (!connectionOpened) {
+              // If connection never opened, it might be an immediate connection refusal
+              // The error event or main try/catch should ideally handle this.
+              // However, if close is called before open and without an error, reject.
+              return reject(new Error(`Agent connection closed before opening for: iptables ${commandString}`))
+            }
+            if (rawOutput.includes('---END---')) {
+              // --- Parsing agent's response (moved inside close) ---
+              let exitCode = -1
+              let stdout = ''
+              let stderr = ''
+              const lines = rawOutput.split(/\r?\n/)
+              let currentSection: 'stdout' | 'stderr' | null = null
 
-    // --- Parsing agent's response ---
-    let exitCode = -1
-    let stdout = ''
-    let stderr = ''
-    const lines = rawOutput.split(/\r?\n/)
-    let currentSection: 'stdout' | 'stderr' | null = null
-
-    for (const line of lines) {
-      if (line.startsWith('EXIT_CODE:')) {
-        exitCode = Number.parseInt(line.substring('EXIT_CODE:'.length), 10)
-      }
-      else if (line === '---STDOUT---') {
-        currentSection = 'stdout'
-      }
-      else if (line === '---STDERR---') {
-        currentSection = 'stderr'
-      }
-      else if (line === '---END---') {
-        currentSection = null
-      }
-      else if (currentSection === 'stdout') {
-        stdout += (stdout ? '\n' : '') + line
-      }
-      else if (currentSection === 'stderr') {
-        stderr += (stderr ? '\n' : '') + line
-      }
+              for (const line of lines) {
+                if (line.startsWith('EXIT_CODE:')) {
+                  exitCode = Number.parseInt(line.substring('EXIT_CODE:'.length), 10)
+                }
+                else if (line === '---STDOUT---') {
+                  currentSection = 'stdout'
+                }
+                else if (line === '---STDERR---') {
+                  currentSection = 'stderr'
+                }
+                else if (line === '---END---') {
+                  currentSection = null
+                  break // Stop parsing after ---END---
+                }
+                else if (currentSection === 'stdout') {
+                  stdout += (stdout ? '\n' : '') + line
+                }
+                else if (currentSection === 'stderr') {
+                  stderr += (stderr ? '\n' : '') + line
+                }
+              }
+              // Resolve with parsed data
+              resolve(processAgentResponse(args, commandString, exitCode, stdout, stderr))
+            }
+            else {
+              // If stream closed without ---END---, it's an incomplete or errored response
+              reject(new Error(`Agent response incomplete for: iptables ${commandString}. Received: ${rawOutput.substring(0, 200)}...`))
+            }
+          },
+          error(sock, error) {
+            // console.error(`Agent socket error: ${error.message}`)
+            clearTimeout(timeout)
+            if (socket)
+              socket.end() // Ensure socket is closed on error
+            reject(new Error(`Agent socket error for 'iptables ${commandString}': ${error.message}`))
+          },
+        },
+      })
     }
-
-    // --- Interpreting iptables results (adapted from original executeIPTablesCommand) ---
-    const operationFlag = args.find(arg => ['-A', '-D', '-C', '-N', '-X', '-F', '-L', '-S', '-I'].includes(arg))
-    const ruleNotFoundMessages = [
-      'no chain/target/match by that name',
-      'bad rule',
-      'rule is not in chain',
-      'does not exist',
-      'target by that name not found',
-      'is not a chain', // for -X on a rule not a chain
-    ]
-
-    const effectiveStdout = stdout.trim()
-    const effectiveStderr = stderr.trim()
-    const combinedOutputLower = (effectiveStdout + effectiveStderr).toLowerCase()
-    const outputIndicatesRuleNotFound = ruleNotFoundMessages.some(msg => combinedOutputLower.includes(msg))
-
-    if (effectiveStdout) {
-      console.warn(`Agent STDOUT: ${effectiveStdout}`)
+    catch (error: any) {
+      clearTimeout(timeout)
+      // This catch is for synchronous errors during Bun.connect() call itself
+      console.error(`Synchronous Bun.connect error for 'iptables ${commandString}': ${error.message}`)
+      reject(new Error(`Agent connection setup error for 'iptables ${commandString}': ${error.message}`))
     }
+  })
+}
 
-    // Log stderr unless it's an expected "not found" for certain operations
-    if (effectiveStderr) {
-      const isExpectedRuleNotFoundForDeleteOrCheck
-        = (operationFlag === '-D' || operationFlag === '-C') && outputIndicatesRuleNotFound
-      const isChainAlreadyExistsForCreate
-        = operationFlag === '-N' && combinedOutputLower.includes('chain already exists')
-      const isChainNotFoundForDelete
-        = operationFlag === '-X' && outputIndicatesRuleNotFound
+// Helper function to process the agent's response and determine success/failure
+// This encapsulates the logic previously at the end of executeIPTablesCommand
+function processAgentResponse(
+  args: string[],
+  commandString: string,
+  exitCode: number,
+  stdout: string,
+  stderr: string,
+): { success: boolean, stdout?: string, stderr?: string, exitCode?: number } {
+  const operationFlag = args.find(arg => ['-A', '-D', '-C', '-N', '-X', '-F', '-L', '-S', '-I'].includes(arg))
+  const ruleNotFoundMessages = [
+    'no chain/target/match by that name',
+    'bad rule',
+    'rule is not in chain',
+    'does not exist',
+    'target by that name not found',
+    'is not a chain', // for -X on a rule not a chain
+  ]
 
-      if (!(isExpectedRuleNotFoundForDeleteOrCheck || isChainAlreadyExistsForCreate || isChainNotFoundForDelete)) {
-        console.warn(`Agent STDERR: ${effectiveStderr}`)
-      }
+  const effectiveStdout = stdout.trim()
+  const effectiveStderr = stderr.trim()
+  const combinedOutputLower = (effectiveStdout + effectiveStderr).toLowerCase()
+  const outputIndicatesRuleNotFound = ruleNotFoundMessages.some(msg => combinedOutputLower.includes(msg))
+
+  if (effectiveStdout) {
+    console.warn(`Agent STDOUT: ${effectiveStdout}`)
+  }
+
+  if (effectiveStderr) {
+    const isExpectedRuleNotFoundForDeleteOrCheck
+      = (operationFlag === '-D' || operationFlag === '-C') && outputIndicatesRuleNotFound
+    const isChainAlreadyExistsForCreate
+      = operationFlag === '-N' && combinedOutputLower.includes('chain already exists')
+    const isChainNotFoundForDelete
+      = operationFlag === '-X' && outputIndicatesRuleNotFound
+
+    if (!(isExpectedRuleNotFoundForDeleteOrCheck || isChainAlreadyExistsForCreate || isChainNotFoundForDelete)) {
+      console.warn(`Agent STDERR: ${effectiveStderr}`)
     }
+  }
 
-    if (exitCode === 0) {
+  if (exitCode === 0) {
+    return { success: true, stdout: effectiveStdout, stderr: effectiveStderr, exitCode }
+  }
+  else {
+    if (operationFlag === '-N' && (combinedOutputLower.includes('chain already exists'))) {
+      console.warn(`Agent: Chain creation reported 'Chain already exists' (considered success for -N): iptables ${commandString}. Exit: ${exitCode}`)
+      return { success: true, stdout: effectiveStdout, stderr: effectiveStderr, exitCode: 0 }
+    }
+    if ((operationFlag === '-D' || operationFlag === '-X') && outputIndicatesRuleNotFound) {
+      console.warn(`Agent: Attempted to remove/delete non-existent rule/chain (considered success for ${operationFlag}): iptables ${commandString}. Exit: ${exitCode}`)
       return { success: true, stdout: effectiveStdout, stderr: effectiveStderr, exitCode }
     }
-    // Exit code is not 0, or special handling for non-zero codes that indicate success for us
-    else {
-      if (operationFlag === '-N' && (combinedOutputLower.includes('chain already exists'))) {
-        console.warn(`Agent: Chain creation reported 'Chain already exists' (considered success for -N): iptables ${commandString}. Exit: ${exitCode}`)
-        return { success: true, stdout: effectiveStdout, stderr: effectiveStderr, exitCode: 0 } // Override to success
-      }
-      if ((operationFlag === '-D' || operationFlag === '-X') && outputIndicatesRuleNotFound) {
-        console.warn(`Agent: Attempted to remove/delete non-existent rule/chain (considered success for ${operationFlag}): iptables ${commandString}. Exit: ${exitCode}`)
-        return { success: true, stdout: effectiveStdout, stderr: effectiveStderr, exitCode } // Still success for cleanup
-      }
-      if (operationFlag === '-C' && outputIndicatesRuleNotFound) {
-        console.warn(`Agent: Rule check reported 'rule does not exist' (expected for -C, returning success:false): iptables ${commandString}. Exit: ${exitCode}`)
-        return { success: false, stdout: effectiveStdout, stderr: effectiveStderr, exitCode } // Correctly success:false
-      }
-      // Genuine error for other commands, or unexpected error
-      console.error(`Agent CMD FAIL: iptables ${commandString} exited with ${exitCode}. Stderr: ${effectiveStderr} Stdout: ${effectiveStdout}`)
+    if (operationFlag === '-C' && outputIndicatesRuleNotFound) {
+      console.warn(`Agent: Rule check reported 'rule does not exist' (expected for -C, returning success:false): iptables ${commandString}. Exit: ${exitCode}`)
       return { success: false, stdout: effectiveStdout, stderr: effectiveStderr, exitCode }
     }
-  }
-  catch (error: any) {
-    console.error(`Agent communication error for 'iptables ${commandString}': ${error.message}`)
-    return { success: false, stderr: `Agent communication error: ${error.message}`, exitCode: -1 }
-  }
-  finally {
-    if (socket) {
-      try {
-        socket.end()
-      }
-      catch (_e) { /* ignore close errors for unused _e */ }
-    }
+    console.error(`Agent CMD FAIL: iptables ${commandString} exited with ${exitCode}. Stderr: ${effectiveStderr} Stdout: ${effectiveStdout}`)
+    return { success: false, stdout: effectiveStdout, stderr: effectiveStderr, exitCode }
   }
 }
 
