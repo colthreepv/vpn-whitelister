@@ -359,17 +359,26 @@ Bun.serve({
     const url = new URL(request.url)
     const clientIp = server.requestIP(request)?.address
 
-    // GET / - View Whitelisted IPs (Section II.1)
+    // GET / - Simple health check endpoint (moved from /health)
     if (url.pathname === '/' && request.method === 'GET') {
+      console.warn(`Health check request to / from ${clientIp || 'unknown IP'}`)
+      return new Response(JSON.stringify({ status: 'healthy', message: 'Service is running.' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    // GET /list - View Whitelisted IPs (moved from /)
+    else if (url.pathname === '/list' && request.method === 'GET') {
       if (!isAuthenticated(request)) {
-        console.warn(`Unauthorized GET / attempt from ${clientIp || 'unknown IP'}`)
+        console.warn(`Unauthorized GET /list attempt from ${clientIp || 'unknown IP'}`)
         return new Response(JSON.stringify({ status: 'error', message: 'Invalid token' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json' },
         })
       }
       try {
-        console.warn(`Received valid GET / request from ${clientIp || 'unknown IP'}. Listing IPs...`)
+        console.warn(`Received valid GET /list request from ${clientIp || 'unknown IP'}. Listing IPs...`)
         const whitelistedIPs = await listWhitelistedIPs()
         return new Response(JSON.stringify({ status: 'success', count: whitelistedIPs.length, whitelisted_ips: whitelistedIPs }), {
           status: 200,
@@ -377,7 +386,7 @@ Bun.serve({
         })
       }
       catch (error: any) {
-        console.error('Error listing whitelisted IPs for GET /:', error)
+        console.error('Error listing whitelisted IPs for GET /list:', error)
         return new Response(JSON.stringify({ status: 'error', message: 'Failed to retrieve whitelisted IPs.' }), {
           status: 500,
           headers: { 'Content-Type': 'application/json' },
