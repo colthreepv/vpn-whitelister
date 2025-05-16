@@ -1,14 +1,19 @@
 {
   "name": "vpn-whitelister",
-  "version": "1.0.0",
-  "packageManager": "pnpm@10.11.0",
-  "description": "",
-  "author": "",
-  "license": "ISC",
-  "keywords": [],
-  "main": "index.js",
+  "version": "1.1.0",
+  "description": "A service to dynamically whitelist client IPs in `iptables` for VPN access via HTTP API.",
+  "author": "Valerio Coltre <valerio.coltre@gmail.com>",
+  "license": "MIT",
+  "keywords": [
+    "vpn",
+    "iptables",
+    "whitelist",
+    "vpn-whitelister"
+  ],
+  "main": "src/index.ts",
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "start": "bun run src/index.ts"
   },
   "dependencies": {
     "hono": "^4.7.9"
@@ -16,7 +21,6 @@
   "devDependencies": {
     "@antfu/eslint-config": "^4.13.1",
     "@types/bun": "^1.2.13",
-    "bun-types": "^1.2.13",
     "eslint": "^9.26.0"
   }
 }

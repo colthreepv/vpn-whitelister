@@ -198,6 +198,22 @@ export async function initializeChains(): Promise<void> {
   else {
     console.warn(`Rule to jump from INPUT to ${IPTABLES_FILTER_CHAIN} already exists.`)
   }
+
+  // Add default drop rule for EXTERNAL_PORT in the filter chain
+  result = await executeIPTablesCommand(['-C', IPTABLES_FILTER_CHAIN, '-p', 'tcp', '--dport', String(EXTERNAL_PORT), '-j', 'DROP'])
+  if (!result.success) {
+    result = await executeIPTablesCommand(['-A', IPTABLES_FILTER_CHAIN, '-p', 'tcp', '--dport', String(EXTERNAL_PORT), '-j', 'DROP'])
+    if (!result.success) {
+      console.error(`Failed to add default DROP rule to ${IPTABLES_FILTER_CHAIN} for port ${EXTERNAL_PORT}. stderr: ${result.stderr}`)
+    }
+    else {
+      console.warn(`Added default DROP rule to ${IPTABLES_FILTER_CHAIN} for port ${EXTERNAL_PORT}.`)
+    }
+  }
+  else {
+    console.warn(`Default DROP rule for port ${EXTERNAL_PORT} in ${IPTABLES_FILTER_CHAIN} already exists.`)
+  }
+
   console.warn('Custom iptables chains initialization attempt complete.')
 }
 
