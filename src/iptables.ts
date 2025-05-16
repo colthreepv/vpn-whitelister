@@ -199,19 +199,19 @@ export async function initializeChains(): Promise<void> {
     console.warn(`Rule to jump from INPUT to ${IPTABLES_FILTER_CHAIN} already exists.`)
   }
 
-  // Add default drop rule for EXTERNAL_PORT in the filter chain
-  result = await executeIPTablesCommand(['-C', IPTABLES_FILTER_CHAIN, '-p', 'tcp', '--dport', String(EXTERNAL_PORT), '-j', 'DROP'])
+  // Add default drop rule for INTERNAL_PORT in the filter chain
+  result = await executeIPTablesCommand(['-C', IPTABLES_FILTER_CHAIN, '-p', 'tcp', '--dport', String(INTERNAL_PORT), '-j', 'DROP'])
   if (!result.success) {
-    result = await executeIPTablesCommand(['-A', IPTABLES_FILTER_CHAIN, '-p', 'tcp', '--dport', String(EXTERNAL_PORT), '-j', 'DROP'])
+    result = await executeIPTablesCommand(['-A', IPTABLES_FILTER_CHAIN, '-p', 'tcp', '--dport', String(INTERNAL_PORT), '-j', 'DROP'])
     if (!result.success) {
-      console.error(`Failed to add default DROP rule to ${IPTABLES_FILTER_CHAIN} for port ${EXTERNAL_PORT}. stderr: ${result.stderr}`)
+      console.error(`Failed to add default DROP rule to ${IPTABLES_FILTER_CHAIN} for port ${INTERNAL_PORT}. stderr: ${result.stderr}`)
     }
     else {
-      console.warn(`Added default DROP rule to ${IPTABLES_FILTER_CHAIN} for port ${EXTERNAL_PORT}.`)
+      console.warn(`Added default DROP rule to ${IPTABLES_FILTER_CHAIN} for port ${INTERNAL_PORT}.`)
     }
   }
   else {
-    console.warn(`Default DROP rule for port ${EXTERNAL_PORT} in ${IPTABLES_FILTER_CHAIN} already exists.`)
+    console.warn(`Default DROP rule for port ${INTERNAL_PORT} in ${IPTABLES_FILTER_CHAIN} already exists.`)
   }
 
   console.warn('Custom iptables chains initialization attempt complete.')
@@ -292,7 +292,7 @@ export async function removeNATRule(): Promise<boolean> {
 // --- Whitelist Rule Management ---
 
 export async function addIPToWhitelist(ip: string): Promise<boolean> {
-  const args: string[] = ['-A', IPTABLES_FILTER_CHAIN, '-s', ip, '-p', 'tcp', '--dport', String(EXTERNAL_PORT), '-j', 'ACCEPT']
+  const args: string[] = ['-I', IPTABLES_FILTER_CHAIN, '1', '-s', ip, '-p', 'tcp', '--dport', String(INTERNAL_PORT), '-j', 'ACCEPT']
   const result = await executeIPTablesCommand(args)
   return result.success
 }
@@ -325,7 +325,7 @@ export async function listWhitelistedIPs(
       }
       if (sIndex !== -1 && (sIndex + 1) < parts.length
         && pIndex !== -1 && (pIndex + 1) < parts.length && parts[pIndex + 1] === 'tcp'
-        && dportIndex !== -1 && (dportIndex + 1) < parts.length && parts[dportIndex + 1] === String(EXTERNAL_PORT)
+        && dportIndex !== -1 && (dportIndex + 1) < parts.length && parts[dportIndex + 1] === String(INTERNAL_PORT)
         && jIndex !== -1 && (jIndex + 1) < parts.length && parts[jIndex + 1] === 'ACCEPT') {
         const potentialIp = parts[sIndex + 1]
         if (ipPattern.test(potentialIp)) {
@@ -368,7 +368,7 @@ export async function clearAllWhitelistRulesForPort(): Promise<{ success: boolea
       }
       if (sIndex !== -1 && (sIndex + 1) < parts.length
         && pIndex !== -1 && (pIndex + 1) < parts.length && parts[pIndex + 1] === 'tcp'
-        && dportIndex !== -1 && (dportIndex + 1) < parts.length && parts[dportIndex + 1] === String(EXTERNAL_PORT)
+        && dportIndex !== -1 && (dportIndex + 1) < parts.length && parts[dportIndex + 1] === String(INTERNAL_PORT)
         && jIndex !== -1 && (jIndex + 1) < parts.length && parts[jIndex + 1] === 'ACCEPT') {
         const potentialIp = parts[sIndex + 1]
         if (ipPattern.test(potentialIp)) {
@@ -378,7 +378,7 @@ export async function clearAllWhitelistRulesForPort(): Promise<{ success: boolea
       }
     }
     if (rulesToDelete.length === 0) {
-      console.warn(`No rules found for chain ${IPTABLES_FILTER_CHAIN} and port ${EXTERNAL_PORT} to delete.`)
+      console.warn(`No rules found for chain ${IPTABLES_FILTER_CHAIN} and port ${INTERNAL_PORT} to delete.`)
       return { success: true, removedCount: 0 }
     }
     for (const rulePart of rulesToDelete) {
