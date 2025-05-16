@@ -49,16 +49,25 @@ async function executeIPTablesCommand(args: string[]): Promise<{ success: boolea
     const stderr = await new Response(proc.stderr).text()
     const exitCode = await proc.exited
 
+    const operationFlag = args.find(arg => ['-A', '-D', '-C', '-N', '-X', '-F', '-L', '-S', '-I'].includes(arg))
+
+    const ruleNotFoundMessages = [
+      'No chain/target/match by that name',
+      'bad rule', // e.g. "iptables: Bad rule (does a matching rule exist in that chain?)."
+      'rule is not in chain', // Another variant
+    ]
+    const stderrIndicatesRuleNotFound = ruleNotFoundMessages.some(msg => stderr.includes(msg))
+
     if (stdout.trim()) {
       console.warn(`iptables stdout: ${stdout.trim()}`)
     }
+
+    // Handle stderr logging
     if (stderr.trim()) {
-      // Don't log stderr as warning if it's a "no rule found for -D" type of message, as it's expected.
-      const isExpectedStderrForDelete = args[0] === '-D'
-        && (stderr.includes('No chain/target/match by that name')
-          || stderr.includes('bad rule') // e.g. "iptables: Bad rule (does a matching rule exist in that chain?)."
-          || stderr.includes('rule is not in chain')) // Another variant
-      if (!isExpectedStderrForDelete) {
+      // Only log as a general warning if it's not an expected "rule not found" for -D or -C,
+      // or if the specific handling later won't cover it.
+      const isExpectedRuleNotFoundForDeleteOrCheck = (operationFlag === '-D' || operationFlag === '-C') && stderrIndicatesRuleNotFound
+      if (!isExpectedRuleNotFoundForDeleteOrCheck) {
         console.warn(`iptables stderr: ${stderr.trim()}`)
       }
     }
@@ -67,16 +76,22 @@ async function executeIPTablesCommand(args: string[]): Promise<{ success: boolea
       return { success: true, stdout: stdout.trim(), stderr: stderr.trim() }
     }
     else {
-      // Specific handling for -D if rule doesn't exist (Section II.3, Plan V.Error Handling)
-      if (args[0] === '-D'
-        && (stderr.includes('No chain/target/match by that name')
-          || stderr.includes('bad rule') // e.g. "iptables: Bad rule (does a matching rule exist in that chain?)."
-          || stderr.includes('rule is not in chain'))) { // Another variant
-        console.warn(`Attempted to remove non-existent or already removed rule (expected for -D sometimes): ${command.join(' ')}`)
+      // Exit code is not 0
+      if (operationFlag === '-D' && stderrIndicatesRuleNotFound) {
+        console.warn(`Attempted to remove non-existent or already removed rule (considered success for -D operation): ${command.join(' ')} Stderr: ${stderr.trim()}`)
         return { success: true, stdout: stdout.trim(), stderr: stderr.trim() } // Still consider it a "success" for cleanup logic
       }
-      console.error(`iptables command failed with exit code ${exitCode}: ${command.join(' ')} Stderr: ${stderr.trim()}`)
-      return { success: false, stdout: stdout.trim(), stderr: stderr.trim() }
+      else if (operationFlag === '-C' && stderrIndicatesRuleNotFound) {
+        // For -C, a "failure" (rule not found) is the expected outcome for the calling logic to then add the rule.
+        // Return success: false, but log it informatively, not as a critical error.
+        console.warn(`iptables check failed: rule does not exist (expected for -C operation, returning success:false to trigger add): ${command.join(' ')} Stderr: ${stderr.trim()}`)
+        return { success: false, stdout: stdout.trim(), stderr: stderr.trim() }
+      }
+      else {
+        // Genuine error for other commands, or unexpected error for -D / -C
+        console.error(`iptables command failed with exit code ${exitCode}: ${command.join(' ')} Stderr: ${stderr.trim()}`)
+        return { success: false, stdout: stdout.trim(), stderr: stderr.trim() }
+      }
     }
   }
   catch (error: any) {
