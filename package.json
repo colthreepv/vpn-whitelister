@@ -1,0 +1,19 @@
+{
+  "name": "vpn-whitelister",
+  "version": "1.0.0",
+  "packageManager": "pnpm@10.11.0",
+  "description": "",
+  "author": "",
+  "license": "ISC",
+  "keywords": [],
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^4.13.1",
+    "@types/bun": "^1.2.13",
+    "bun-types": "^1.2.13",
+    "eslint": "^9.26.0"
+  }
+}
