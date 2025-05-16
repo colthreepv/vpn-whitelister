@@ -42,7 +42,8 @@ function isAuthenticated(request: Request): boolean {
 }
 
 // New helper function for iptables commands using the agent (replaces old Bun.spawn version)
-async function executeIPTablesCommand(args: string[]): Promise<{ success: boolean, stdout?: string, stderr?: string, exitCode?: number }> {
+// Export for mocking in tests
+export async function executeIPTablesCommand(args: string[]): Promise<{ success: boolean, stdout?: string, stderr?: string, exitCode?: number }> {
   const commandString = args.join(' ')
   console.warn(`Agent CMD: iptables ${commandString}`)
 
@@ -372,20 +373,53 @@ async function addIPToWhitelist(ip: string): Promise<boolean> {
 }
 
 // Helper to list whitelisted IPs (Section III.1)
-async function listWhitelistedIPs(): Promise<string[]> {
+// Export for testing
+export async function listWhitelistedIPs(): Promise<string[]> {
   const args: string[] = ['-S', IPTABLES_FILTER_CHAIN]
   const result = await executeIPTablesCommand(args)
   const ips: string[] = []
 
   if (result.success && result.stdout) {
     const rules = result.stdout.split('\n')
-    const ipRegex = new RegExp(`^-A ${IPTABLES_FILTER_CHAIN} -s (\\d{1,3}\\.?\\d{1,3}\\.?\\d{1,3}\\.?\\d{1,3}(?:/\\d{1,2})?) .* -p tcp .* --dport ${EXTERNAL_PORT} -j ACCEPT$`)
+    const ipPattern = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:\/\d{1,2})?$/ // Non-capturing group for CIDR
+
     for (const rule of rules) {
-      const match = rule.match(ipRegex)
-      if (match && match[1]) {
-        ips.push(match[1])
+      const trimmedRule = rule.trim()
+      if (!trimmedRule.startsWith(`-A ${IPTABLES_FILTER_CHAIN}`)) {
+        continue
+      }
+
+      const parts = trimmedRule.split(/\s+/) // Split by one or more spaces
+
+      let sIndex = -1
+      let pIndex = -1
+      let dportIndex = -1
+      let jIndex = -1
+
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i] === '-s')
+          sIndex = i
+        else if (parts[i] === '-p')
+          pIndex = i
+        else if (parts[i] === '--dport')
+          dportIndex = i
+        else if (parts[i] === '-j')
+          jIndex = i
+      }
+
+      if (sIndex !== -1 && (sIndex + 1) < parts.length
+        && pIndex !== -1 && (pIndex + 1) < parts.length && parts[pIndex + 1] === 'tcp'
+        && dportIndex !== -1 && (dportIndex + 1) < parts.length && parts[dportIndex + 1] === String(EXTERNAL_PORT)
+        && jIndex !== -1 && (jIndex + 1) < parts.length && parts[jIndex + 1] === 'ACCEPT') {
+        const potentialIp = parts[sIndex + 1]
+        if (ipPattern.test(potentialIp)) {
+          ips.push(potentialIp)
+        }
       }
     }
+  }
+  else if (!result.success) {
+    console.error(`Failed to list iptables rules in chain ${IPTABLES_FILTER_CHAIN}: ${result.stderr || 'Unknown error'}`)
   }
   return ips
 }
@@ -399,17 +433,43 @@ async function clearAllWhitelistRulesForPort(): Promise<{ success: boolean, remo
 
   if (listResult.success && listResult.stdout) {
     const rules = listResult.stdout.split('\n').filter(rule => rule.trim() !== '')
-    // Filter rules that are for our specific port and ACCEPT
-    const relevantRuleRegex = new RegExp(`^-A ${IPTABLES_FILTER_CHAIN} -s (\\d{1,3}\\.?\\d{1,3}\\.?\\d{1,3}\\.?\\d{1,3}(?:/\\d{1,2})?) .* -p tcp .* --dport ${EXTERNAL_PORT} -j ACCEPT$`)
+    const ipPattern = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:\/\d{1,2})?$/ // Non-capturing group for CIDR
 
     const rulesToDelete: string[] = []
     for (const rule of rules) {
-      if (relevantRuleRegex.test(rule)) {
-        // Construct the delete command arguments from the rule string
-        // Example rule string: "-A VPN-FILTER -s 1.2.3.4/32 -p tcp -m tcp --dport 41872 -j ACCEPT"
-        // We need to pass everything after "-A CHAIN_NAME " to "-D CHAIN_NAME"
-        const ruleArgsPart = rule.substring(`-A ${IPTABLES_FILTER_CHAIN} `.length)
-        rulesToDelete.push(ruleArgsPart)
+      const trimmedRule = rule.trim()
+      if (!trimmedRule.startsWith(`-A ${IPTABLES_FILTER_CHAIN}`)) {
+        continue
+      }
+
+      const parts = trimmedRule.split(/\s+/) // Split by one or more spaces
+
+      let sIndex = -1
+      let pIndex = -1
+      let dportIndex = -1
+      let jIndex = -1
+
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i] === '-s')
+          sIndex = i
+        else if (parts[i] === '-p')
+          pIndex = i
+        else if (parts[i] === '--dport')
+          dportIndex = i
+        else if (parts[i] === '-j')
+          jIndex = i
+      }
+
+      if (sIndex !== -1 && (sIndex + 1) < parts.length
+        && pIndex !== -1 && (pIndex + 1) < parts.length && parts[pIndex + 1] === 'tcp'
+        && dportIndex !== -1 && (dportIndex + 1) < parts.length && parts[dportIndex + 1] === String(EXTERNAL_PORT)
+        && jIndex !== -1 && (jIndex + 1) < parts.length && parts[jIndex + 1] === 'ACCEPT') {
+        const potentialIp = parts[sIndex + 1]
+        if (ipPattern.test(potentialIp)) {
+          // Reconstruct the rule arguments part for deletion (everything after "-A CHAIN_NAME ")
+          const ruleArgsPart = parts.slice(2).join(' ')
+          rulesToDelete.push(ruleArgsPart)
+        }
       }
     }
 
@@ -418,11 +478,7 @@ async function clearAllWhitelistRulesForPort(): Promise<{ success: boolean, remo
       return { success: true, removedCount: 0 }
     }
 
-    // Delete rules one by one.
-    // It's generally safer to delete by exact rule specification.
     for (const rulePart of rulesToDelete) {
-      // Split rulePart into arguments for executeIPTablesCommand
-      // This needs careful handling if there are quoted arguments in the future, but for typical iptables rules this should be okay.
       const deleteArgs: string[] = ['-D', IPTABLES_FILTER_CHAIN, ...rulePart.split(' ')]
       const deleteResult = await executeIPTablesCommand(deleteArgs)
       if (deleteResult.success) {
@@ -430,13 +486,12 @@ async function clearAllWhitelistRulesForPort(): Promise<{ success: boolean, remo
       }
       else {
         allDeletionsSuccessful = false
-        // Error already logged by executeIPTablesCommand
         console.error(`Failed to delete rule: iptables -D ${IPTABLES_FILTER_CHAIN} ${rulePart}`)
       }
     }
   }
   else if (!listResult.success) {
-    console.error(`Failed to list iptables rules in chain ${IPTABLES_FILTER_CHAIN} before attempting cleanup.`)
+    console.error(`Failed to list iptables rules in chain ${IPTABLES_FILTER_CHAIN} before attempting cleanup. stderr: ${listResult.stderr}`)
     return { success: false, removedCount: 0 }
   }
 
